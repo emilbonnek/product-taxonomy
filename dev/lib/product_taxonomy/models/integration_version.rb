@@ -7,36 +7,7 @@ module ProductTaxonomy
   # - The full names of categories in the integration's taxonomy.
   # - The mapping rules for converting between the integration's taxonomy and Shopify's taxonomy.
   class IntegrationVersion
-    INTEGRATIONS_PATH = File.expand_path("integrations", ProductTaxonomy::DATA_PATH)
-
     class << self
-      # Generate all distribution files for all integration versions.
-      #
-      # @param output_path [String] The path to the output directory.
-      # @param logger [Logger] The logger to use for logging messages.
-      # @param current_shopify_version [String] The current version of the Shopify taxonomy.
-      # @param base_path [String] The path to the base directory containing integration versions.
-      def generate_all_distributions(output_path:, logger:, current_shopify_version: nil, base_path: INTEGRATIONS_PATH)
-        integration_versions = load_all_from_source(current_shopify_version:, base_path:)
-        all_mappings = integration_versions.each_with_object([]) do |integration_version, all_mappings|
-          logger.info("Generating integration mappings for #{integration_version.name}/#{integration_version.version}")
-          integration_version.generate_distributions(output_path:)
-          all_mappings.concat(integration_version.to_json(direction: :both))
-        end
-        generate_all_mappings_file(mappings: all_mappings, current_shopify_version:, output_path:)
-      end
-
-      # Load all integration versions from the source data directory.
-      #
-      # @return [Array<IntegrationVersion>]
-      def load_all_from_source(current_shopify_version: nil, base_path: INTEGRATIONS_PATH)
-        integrations = YAML.safe_load_file(File.expand_path("integrations.yml", base_path))
-        integrations.pluck("available_versions").flatten.map do |integration_version|
-          integration_path = File.expand_path(integration_version, base_path)
-          load_from_source(integration_path:, current_shopify_version:)
-        end
-      end
-
       # Load an integration version from the provided source data directory.
       #
       # @param integration_path [String] The path to the integration version source data directory.
@@ -49,11 +20,13 @@ module ProductTaxonomy
           integration_path:,
           direction: :from_shopify,
           full_names_by_id:,
+          current_shopify_version:,
         )
         to_shopify_mappings = MappingRule.load_rules_from_source(
           integration_path:,
           direction: :to_shopify,
           full_names_by_id:,
+          current_shopify_version:,
         )
 
         integration_pathname = Pathname.new(integration_path)
@@ -68,18 +41,6 @@ module ProductTaxonomy
         )
       end
 
-      # Generate a JSON file containing all mappings for all integration versions.
-      #
-      # @param mappings [Array<Hash>] The mappings to include in the file.
-      # @param version [String] The current version of the Shopify taxonomy.
-      # @param output_path [String] The path to the output directory.
-      def generate_all_mappings_file(mappings:, current_shopify_version:, output_path:)
-        File.write(
-          File.expand_path("all_mappings.json", integrations_output_path(output_path)),
-          JSON.pretty_generate(to_json(mappings:, current_shopify_version:)) + "\n",
-        )
-      end
-
       # Generate a JSON representation for a given set of mappings and version of the Shopify taxonomy.
       #
       # @param version [String] The current version of the Shopify taxonomy.
@@ -90,14 +51,6 @@ module ProductTaxonomy
           version: current_shopify_version,
           mappings:,
         }
-      end
-
-      # Generate the path to the integrations output directory.
-      #
-      # @param base_output_path [String] The base path to the output directory.
-      # @return [String]
-      def integrations_output_path(base_output_path)
-        File.expand_path("en/integrations", base_output_path)
       end
     end
 
@@ -117,7 +70,8 @@ module ProductTaxonomy
       full_names_by_id:,
       current_shopify_version: nil,
       from_shopify_mappings: nil,
-      to_shopify_mappings: nil
+      to_shopify_mappings: nil,
+      to_shopify_version: nil
     )
       @name = name
       @version = version
@@ -141,7 +95,7 @@ module ProductTaxonomy
     # @param output_path [String] The path to the output directory.
     # @param direction [Symbol] The direction of the distribution file to generate (:from_shopify or :to_shopify).
     def generate_distribution(output_path:, direction:)
-      output_dir = File.expand_path(@name, self.class.integrations_output_path(output_path))
+      output_dir = File.expand_path(@name, Integration.integrations_output_path(output_path))
       FileUtils.mkdir_p(output_dir)
 
       json = self.class.to_json(mappings: [to_json(direction:)], current_shopify_version: @current_shopify_version)
@@ -153,6 +107,16 @@ module ProductTaxonomy
         File.expand_path("#{distribution_filename(direction:)}.txt", output_dir),
         to_txt(direction:) + "\n",
       )
+    end
+
+    def remap_shopify_mappings_against(next_integration_version)
+      @to_shopify_mappings.each do |mapping|
+        output_category_id = mapping.output_category["id"]
+        newer_mapping = next_integration_version.to_shopify_mappings.find do
+          _1.input_category["id"] == output_category_id
+        end
+        mapping.output_category = newer_mapping&.output_category || Category.find_by(id: output_category_id)
+      end
     end
 
     # For a mapping to an external taxonomy, get the IDs of external categories that are not mapped from Shopify.
